@@ -2,12 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { runAudit } from "@/lib/audit-engine";
 import { saveAudit } from "@/lib/audit-store";
 import { generateAISummary, buildFallbackSummary } from "@/lib/ai-summary";
-import { saveAuditToDb } from "@/lib/supabase";
+import { saveAuditToDb, getLeadEmailForAudit } from "@/lib/supabase";
+import { getCurrentSnapshot } from "@/lib/pricing-diff";
 import type { AuditFormData, ApiResponse, AuditResult } from "@/types";
 
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as AuditFormData;
+    const body = (await req.json()) as AuditFormData & { email?: string };
 
     // Basic validation
     if (!body.teamSize || !body.useCase || !Array.isArray(body.tools)) {
@@ -25,7 +26,8 @@ export async function POST(req: NextRequest) {
     }
 
     // 1. Run deterministic audit (no AI, fast)
-    const auditResult = runAudit(body);
+    const { email: _email, ...formData } = body;
+    const auditResult = runAudit(formData);
 
     // 2. Generate AI summary — returns null on any failure, we fall back to template
     const aiSummary = await generateAISummary(auditResult);
@@ -35,8 +37,18 @@ export async function POST(req: NextRequest) {
       aiSummary: aiSummary ?? buildFallbackSummary(auditResult),
     };
 
-    // 3. Persist to Supabase (primary) with in-memory fallback
-    const saved = await saveAuditToDb(fullResult);
+    // 3. Capture pricing snapshot for Round 2 change detection
+    const pricingSnapshot = getCurrentSnapshot();
+
+    // 4. Use email from body if provided (future: frontend sends it)
+    const userEmail = body.email ?? undefined;
+
+    // 5. Persist to Supabase (primary) with in-memory fallback
+    const saved = await saveAuditToDb(fullResult, {
+      userEmail,
+      pricingSnapshot,
+    });
+
     if (!saved) {
       // Supabase failed — fall back to in-memory so the user still gets results
       saveAudit(fullResult);

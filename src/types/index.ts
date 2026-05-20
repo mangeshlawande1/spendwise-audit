@@ -167,3 +167,66 @@ export interface ApiResponse<T> {
   data?: T;
   error?: string;
 }
+// ─── Round 2: Pricing Diff & Re-audit Types ───────────────────────────────────
+
+export interface PricingSnapshot {
+  capturedAt: string;
+  tools: Array<{
+    id: string;
+    plans: Array<{
+      id: string;
+      pricePerSeat: number;
+    }>;
+  }>;
+}
+
+export type PlanChangeType = "price_change" | "plan_added" | "plan_removed";
+
+export interface PlanChange {
+  toolId: string;
+  toolName: string;
+  planId: string;
+  planName: string;
+  oldPrice: number;
+  newPrice: number;
+  delta: number; // negative = cheaper
+  changeType: PlanChangeType;
+}
+
+export interface SnapshotDiff {
+  hasChanges: boolean;
+  changes: PlanChange[];
+  changedToolIds: string[];
+}
+
+export interface ToolDiff {
+  toolId: string;
+  toolName: string;
+  oldRecommendation: RecommendationType;
+  newRecommendation: RecommendationType;
+  oldMonthlySavings: number;
+  newMonthlySavings: number;
+  oldReasoning: string;
+  newReasoning: string;
+}
+
+export interface ReauditDiff {
+  changedTools: string[];
+  savingsDelta: number;
+  toolDiffs: ToolDiff[];
+  crossToolDiffs: CrossToolFinding[];
+}
+
+export interface ReauditResponse {
+  newAuditId: string;
+  original: AuditResult;
+  fresh: AuditResult;
+  diff: ReauditDiff;
+}
+
+// Extended AuditResult stored in DB with Round 2 fields
+export interface AuditResultExtended extends AuditResult {
+  userEmail?: string;
+  pricingSnapshot?: PricingSnapshot;
+  parentAuditId?: string;
+}

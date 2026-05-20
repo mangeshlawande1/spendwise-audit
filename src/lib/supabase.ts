@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
-import type { AuditResult, LeadData } from "@/types";
+import type { AuditResult, AuditResultExtended, LeadData, PricingSnapshot } from "@/types";
+import type { AuditFormData } from "@/types";
 
 // ─── Client setup ─────────────────────────────────────────────────────────────
 
@@ -52,7 +53,14 @@ CREATE INDEX IF NOT EXISTS leads_ip_hash_created_at
  * Returns true on success, false on any failure.
  * Never throws — caller falls back to in-memory store.
  */
-export async function saveAuditToDb(result: AuditResult): Promise<boolean> {
+export async function saveAuditToDb(
+  result: AuditResult,
+  opts?: {
+    userEmail?: string;
+    pricingSnapshot?: PricingSnapshot;
+    parentAuditId?: string;
+  }
+): Promise<boolean> {
   const client = getServiceClient();
   if (!client) {
     console.warn("[supabase] No client — SUPABASE env vars missing");
@@ -65,10 +73,15 @@ export async function saveAuditToDb(result: AuditResult): Promise<boolean> {
       created_at: result.createdAt,
       form_data: result.formData,
       tool_results: result.toolResults,
+      cross_tool_findings: result.crossToolFindings,
       total_monthly_savings: result.totalMonthlySavings,
       total_annual_savings: result.totalAnnualSavings,
       savings_tier: result.savingsTier,
+      efficiency_score: result.efficiencyScore,
       ai_summary: result.aiSummary,
+      user_email: opts?.userEmail ?? null,
+      pricing_snapshot: opts?.pricingSnapshot ?? null,
+      parent_audit_id: opts?.parentAuditId ?? null,
     });
 
     if (error) {
@@ -171,5 +184,171 @@ export async function isRateLimited(ipHash: string): Promise<boolean> {
     return (count ?? 0) >= 3;
   } catch {
     return false;
+  }
+}
+
+
+// ─── Round 2: email + snapshot helpers ───────────────────────────────────────
+
+/**
+ * Fetch all audits that have a user_email set.
+ * Used by detect-changes to find who to notify.
+ * Capped at 500 rows — fine for an internship demo.
+ */
+export async function getAuditsWithEmail(): Promise<
+  Array<{
+    id: string;
+    user_email: string;
+    form_data: AuditFormData;
+    pricing_snapshot: PricingSnapshot | null;
+    created_at: string;
+  }>
+> {
+  const client = getServiceClient();
+  if (!client) return [];
+
+  try {
+    const { data, error } = await client
+      .from("audits")
+      .select("id, user_email, form_data, pricing_snapshot, created_at")
+      .not("user_email", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(500);
+
+    if (error || !data) return [];
+    return data as Array<{
+      id: string;
+      user_email: string;
+      form_data: AuditFormData;
+      pricing_snapshot: PricingSnapshot | null;
+      created_at: string;
+    }>;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Look up the email of the lead associated with an audit ID.
+ * Used when creating an audit to backfill user_email from the leads table.
+ */
+export async function getLeadEmailForAudit(
+  auditId: string
+): Promise<string | null> {
+  const client = getServiceClient();
+  if (!client) return null;
+
+  try {
+    const { data, error } = await client
+      .from("leads")
+      .select("email")
+      .eq("audit_id", auditId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error || !data) return null;
+    return data.email as string;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check if we already sent a pricing-change notification in the last 24h
+ * for the same set of changed tools. Prevents duplicate emails.
+ */
+export async function getRecentPricingEvent(
+  changedToolIds: string[]
+): Promise<boolean> {
+  const client = getServiceClient();
+  if (!client) return false;
+
+  try {
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    const { data, error } = await client
+      .from("pricing_events")
+      .select("id")
+      .contains("changed_tools", changedToolIds)
+      .gte("detected_at", oneDayAgo)
+      .limit(1)
+      .maybeSingle();
+
+    if (error) return false;
+    return !!data;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Log a pricing-change detection event for deduplication.
+ */
+export async function savePricingEvent(opts: {
+  snapshotBefore: PricingSnapshot;
+  snapshotAfter: PricingSnapshot;
+  changedTools: string[];
+  affectedEmails: string[];
+  emailsSent: number;
+}): Promise<string | null> {
+  const client = getServiceClient();
+  if (!client) return null;
+
+  try {
+    const { data, error } = await client
+      .from("pricing_events")
+      .insert({
+        snapshot_before: opts.snapshotBefore,
+        snapshot_after: opts.snapshotAfter,
+        changed_tools: opts.changedTools,
+        affected_emails: opts.affectedEmails,
+        emails_sent: opts.emailsSent,
+      })
+      .select("id")
+      .single();
+
+    if (error || !data) return null;
+    return data.id as string;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch a full audit row including Round 2 extended columns.
+ */
+export async function getAuditExtendedFromDb(
+  id: string
+): Promise<AuditResultExtended | null> {
+  const client = getServiceClient();
+  if (!client) return null;
+
+  try {
+    const { data, error } = await client
+      .from("audits")
+      .select("*")
+      .eq("id", id)
+      .single();
+
+    if (error || !data) return null;
+
+    return {
+      id: data.id,
+      createdAt: data.created_at,
+      formData: data.form_data,
+      toolResults: data.tool_results,
+      crossToolFindings: data.cross_tool_findings ?? [],
+      totalMonthlySavings: data.total_monthly_savings,
+      totalAnnualSavings: data.total_annual_savings,
+      savingsTier: data.savings_tier,
+      efficiencyScore: data.efficiency_score ?? 0,
+      aiSummary: data.ai_summary,
+      userEmail: data.user_email ?? undefined,
+      pricingSnapshot: data.pricing_snapshot ?? undefined,
+      parentAuditId: data.parent_audit_id ?? undefined,
+    } as AuditResultExtended;
+  } catch {
+    return null;
   }
 }
