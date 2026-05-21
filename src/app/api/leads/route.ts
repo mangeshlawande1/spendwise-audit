@@ -63,10 +63,14 @@ export async function POST(req: NextRequest) {
 
     // 5. Send confirmation email — fire and forget, never blocks response
     const audit = (await getAuditFromDb(auditId)) ?? getAudit(auditId) ?? null;
+    // FIXED — await the email before returning the response
     if (audit) {
-      sendAuditConfirmation(email, audit).catch((err) =>
-        console.error("[/api/leads] Email send failed:", err)
-      );
+      try {
+        await sendAuditConfirmation(email, audit);
+      } catch (err) {
+        // Log but don't fail the request — lead is already saved
+        console.error("[/api/leads] Email send failed:", err);
+      }
     }
 
     return NextResponse.json<ApiResponse<{ success: true }>>({
