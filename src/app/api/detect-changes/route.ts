@@ -20,7 +20,9 @@ import type {
 
 function isAuthorized(req: NextRequest): boolean {
   const expected = process.env.CRON_SECRET;
-  if (!expected) return true; // no secret set → open (local dev)
+  if (!expected) {
+    return process.env.NODE_ENV !== "production";
+  }
 
   // POST: check x-cron-secret header
   const headerSecret = req.headers.get("x-cron-secret");
@@ -178,7 +180,8 @@ async function handleDetectChanges(req: NextRequest): Promise<Response> {
         }
       } catch (err) {
         // One failure must never stop the rest. Log and continue.
-        console.error(`[detect-changes] Email failed for ${email}:`, err);
+        const masked = email.replace(/(^.).*(@.*$)/, "$1***$2");
+        console.error(`[detect-changes] Email failed for ${masked}:`, err);      
       }
     }
 
@@ -190,13 +193,15 @@ async function handleDetectChanges(req: NextRequest): Promise<Response> {
         tools: [],
       };
 
-    const eventId = await savePricingEvent({
-      snapshotBefore: beforeSnapshot,
-      snapshotAfter: currentSnapshot,
-      changedTools: allChangedToolIds,
-      affectedEmails: notifiedEmails,
-      emailsSent,
-    });
+    const eventId = simulateTool
+      ? null
+      : await savePricingEvent({
+          snapshotBefore: beforeSnapshot,
+          snapshotAfter: currentSnapshot,
+          changedTools: allChangedToolIds,
+          affectedEmails: notifiedEmails,
+          emailsSent,
+        });
 
     return NextResponse.json<ApiResponse<DetectChangesResponse>>({
       data: {
