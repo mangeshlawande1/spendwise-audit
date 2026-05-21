@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { ToolDiffEntry, ToolAuditResult } from "@/types";
+import type { ToolDiffEntry } from "@/types";
 import { formatCurrency } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 
@@ -13,16 +13,16 @@ const REC_LABELS: Record<string, string> = {
   optimal: "Already optimal ✓",
 };
 
-interface ChangedRowProps {
+interface DiffToolRowProps {
   diff: ToolDiffEntry;
   defaultOpen?: boolean;
 }
 
-export function DiffToolRow({ diff, defaultOpen = true }: ChangedRowProps) {
+export function DiffToolRow({ diff, defaultOpen = true }: DiffToolRowProps) {
   const [open, setOpen] = useState(defaultOpen);
 
   if (!diff.changed) {
-    // Unchanged tool — collapsible, muted
+    // Unchanged tool — collapsible, muted, collapsed by default
     return (
       <div className="card border-surface-border opacity-60">
         <button

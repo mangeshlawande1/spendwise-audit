@@ -58,17 +58,21 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 4. Save to Supabase
+    // 4. Save to Supabase (lead + backfill user_email on audit row)
     await saveLeadToDb({ email, companyName, role, teamSize, auditId, ipHash });
 
-    // 5. Send confirmation email — fire and forget, never blocks response
+    // 5. Send confirmation email — MUST be awaited on Vercel.
+    // Vercel kills the serverless function the moment a response is returned.
+    // Fire-and-forget (.catch only) works locally but silently drops the email
+    // in production because the fetch to Resend is still in-flight when the
+    // function exits. Awaiting keeps the function alive until Resend confirms.
     const audit = (await getAuditFromDb(auditId)) ?? getAudit(auditId) ?? null;
-    // FIXED — await the email before returning the response
     if (audit) {
       try {
         await sendAuditConfirmation(email, audit);
       } catch (err) {
-        // Log but don't fail the request — lead is already saved
+        // Non-fatal — lead is already saved, email failure should not surface
+        // as a user-visible error. Log for Vercel Functions logs.
         console.error("[/api/leads] Email send failed:", err);
       }
     }
