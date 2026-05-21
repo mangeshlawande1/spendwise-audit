@@ -1,80 +1,75 @@
 "use client";
+
 import { useState } from "react";
 import type { ReauditResponse } from "@/types";
 
-interface Props {
+interface ReauditBannerProps {
   auditId: string;
-  onDiffReady: (diff: ReauditResponse) => void;
+  onDiffReady: (data: ReauditResponse) => void;
 }
 
-export function ReauditBanner({ auditId, onDiffReady }: Props) {
+export function ReauditBanner({ auditId, onDiffReady }: ReauditBannerProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [dismissed, setDismissed] = useState(false);
-
-  if (dismissed) return null;
 
   async function handleReaudit() {
     setLoading(true);
     setError(null);
+
     try {
       const res = await fetch(`/api/audit/${auditId}/reaudit`, {
         method: "POST",
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? "Failed");
-      onDiffReady(json.data);
+
+      if (!res.ok || json.error) {
+        throw new Error(json.error ?? "Re-audit failed");
+      }
+
+      onDiffReady(json.data as ReauditResponse);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Unknown error");
+      setError(e instanceof Error ? e.message : "Something went wrong");
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div className="border border-amber-400/50 bg-amber-950/30 rounded-xl p-4 mb-6">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
-          <span className="text-2xl">⚡</span>
-          <div>
-            <p className="text-amber-300 font-semibold">
-              Pricing has changed since your audit
-            </p>
-            <p className="text-amber-400/70 text-sm mt-1">
-              Re-run to see updated recommendations with a side-by-side
-              comparison of what changed.
-            </p>
-          </div>
-        </div>
-        <button
-          onClick={() => setDismissed(true)}
-          className="text-slate-600 hover:text-slate-400 transition-colors text-lg leading-none shrink-0"
-          aria-label="Dismiss"
-        >
-          ×
-        </button>
-      </div>
-
-      <div className="mt-3 flex items-center gap-3">
-        <button
-          onClick={handleReaudit}
-          disabled={loading}
-          className="px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 disabled:cursor-not-allowed text-black rounded-lg text-sm font-semibold transition-colors"
-        >
-          {loading ? "Running fresh audit…" : "Re-run Audit →"}
-        </button>
-        {loading && (
-          <p className="text-amber-400/60 text-sm">
-            This usually takes a few seconds…
+    <div className="border border-amber-500/30 bg-amber-500/5 rounded-xl p-5 mb-6">
+      <div className="flex items-start gap-3">
+        <span className="text-xl flex-shrink-0">⚡</span>
+        <div className="flex-1 min-w-0">
+          <p className="text-amber-300 font-semibold text-sm">
+            Pricing has changed on tools in this audit
           </p>
-        )}
-      </div>
+          <p className="text-amber-400/70 text-xs mt-1 leading-relaxed">
+            Click below to re-run the audit against current pricing and see a
+            side-by-side comparison of what changed.
+          </p>
 
-      {error && (
-        <p className="text-red-400 text-sm mt-2">
-          Error: {error}. Please try again.
-        </p>
-      )}
+          {error && (
+            <p role="alert" className="text-red-400 text-xs mt-2">
+              {error}
+            </p>
+          )}
+
+          <button
+            type="button"
+            onClick={handleReaudit}
+            disabled={loading}
+            className="mt-3 inline-flex items-center gap-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 disabled:cursor-not-allowed text-black font-semibold text-sm px-4 py-2 rounded-lg transition-colors"
+          >
+            {loading ? (
+              <>
+                <span className="animate-spin">⟳</span>
+                Running audit…
+              </>
+            ) : (
+              <>Re-run Audit →</>
+            )}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

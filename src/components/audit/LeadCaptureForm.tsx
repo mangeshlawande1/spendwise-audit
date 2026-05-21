@@ -20,7 +20,7 @@ export function LeadCaptureForm({ result }: LeadCaptureFormProps) {
   const [honeypot, setHoneypot] = useState("");
 
   async function handleSubmit() {
-    if (honeypot) return; // Silent drop for bots
+    if (honeypot) return;
     if (!email.trim()) {
       setError("Email is required.");
       return;
@@ -43,7 +43,7 @@ export function LeadCaptureForm({ result }: LeadCaptureFormProps) {
           role: role.trim() || undefined,
           teamSize: result.formData.teamSize,
           auditId: result.id,
-          website: honeypot, // honeypot — empty for real users
+          website: honeypot,
         }),
       });
 
@@ -63,15 +63,34 @@ export function LeadCaptureForm({ result }: LeadCaptureFormProps) {
 
   if (submitted) {
     return (
-      <div className="card p-6 text-center">
-        <div className="text-3xl mb-3">📬</div>
-        <h3 className="text-white font-semibold mb-1">Report sent!</h3>
-        <p className="text-slate-400 text-sm">
-          Check your inbox for a copy of this audit.
-          {result.savingsTier === "high" && (
-            <> Our team will reach out to discuss how Credex credits can help.</>
-          )}
-        </p>
+      <div className="card p-6 text-center space-y-4">
+        <div className="text-3xl">📬</div>
+        <div>
+          <h3 className="text-white font-semibold mb-1">Report sent!</h3>
+          <p className="text-slate-400 text-sm">
+            Check your inbox for a copy of this audit.
+            {result.savingsTier === "high" && (
+              <> Our team will reach out to discuss how Credex credits can help.</>
+            )}
+          </p>
+        </div>
+
+        {/* Pricing alert notice — explains the re-audit flow to the user */}
+        <div className="border-t border-surface-border pt-4">
+          <div className="flex items-start gap-3 text-left bg-brand-500/5 border border-brand-500/20 rounded-xl p-4">
+            <span className="text-lg flex-shrink-0">⚡</span>
+            <div>
+              <p className="text-brand-300 font-semibold text-sm">
+                Pricing alerts are on
+              </p>
+              <p className="text-slate-400 text-xs mt-1 leading-relaxed">
+                If pricing changes on any tool in your audit, we&apos;ll email you
+                automatically. You&apos;ll get a one-click link to see exactly what
+                changed and how it affects your recommendations.
+              </p>
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
@@ -80,7 +99,8 @@ export function LeadCaptureForm({ result }: LeadCaptureFormProps) {
     <div className="card p-6">
       <h3 className="text-white font-semibold mb-1">Get your report by email</h3>
       <p className="text-slate-400 text-sm mb-5">
-        We&apos;ll send a copy of this audit.
+        We&apos;ll send a copy of this audit and alert you if pricing changes on
+        any of your tools — so your recommendations never go stale.
         {result.savingsTier === "high" && (
           <> For high-savings cases, our team will follow up with options.</>
         )}
@@ -164,7 +184,7 @@ export function LeadCaptureForm({ result }: LeadCaptureFormProps) {
         </button>
 
         <p className="text-center text-xs text-slate-600">
-          No spam. No sales pitch unless you want one. Unsubscribe anytime.
+          No spam. We&apos;ll only email you when pricing changes on your tools.
         </p>
       </div>
     </div>
