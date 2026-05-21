@@ -1,30 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getAudit } from "@/lib/audit-store";
+import { getAuditFromDb, getAuditRowFromDb, saveReauditToDb } from "@/lib/supabase";
 import { runAudit } from "@/lib/audit-engine";
 import { generateAISummary, buildFallbackSummary } from "@/lib/ai-summary";
-import { saveAuditToDb, getAuditExtendedFromDb, getAuditFromDb } from "@/lib/supabase";
-import { saveAudit, getAudit } from "@/lib/audit-store";
-import { getCurrentSnapshot } from "@/lib/pricing-diff";
-import type {
-  ApiResponse,
-  AuditResult,
-  ReauditResponse,
-  ReauditDiff,
-  ToolDiff,
-} from "@/types";
+import { getCurrentSnapshot, computeReauditDiff } from "@/lib/pricing-diff";
+import type { ApiResponse, AuditResult, ReauditResponse } from "@/types";
 
 export async function POST(
   _req: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    const originalId = params.id;
+    const { id } = params;
 
-    // ── 1. Fetch original audit ────────────────────────────────────────────
-    const original =
-      (await getAuditExtendedFromDb(originalId)) ??
-      (await getAuditFromDb(originalId)) ??
-      getAudit(originalId);
-
+    // 1. Fetch original audit (full result for diff) + raw row (for user_email)
+    const original = (await getAuditFromDb(id)) ?? getAudit(id) ?? null;
     if (!original) {
       return NextResponse.json<ApiResponse<never>>(
         { error: "Original audit not found" },
@@ -32,69 +22,35 @@ export async function POST(
       );
     }
 
-    // ── 2. Re-run audit with same formData (different pricing snapshot) ────
-    const freshResult = runAudit(original.formData);
+    // BUG FIX 5: Re-audits were saved without user_email, so a second
+    // detect-changes run would miss re-audit rows. Carry email forward
+    // from the original audit's DB row.
+    const originalRow = await getAuditRowFromDb(id);
+    const userEmail = originalRow?.user_email ?? undefined;
 
-    // ── 3. Generate AI summary for fresh result ────────────────────────────
-    const aiSummary = await generateAISummary(freshResult);
-    const fullFresh: AuditResult = {
-      ...freshResult,
-      aiSummary: aiSummary ?? buildFallbackSummary(freshResult),
+    // 2. Re-run same formData through existing engine (same logic, current prices)
+    const freshRaw = runAudit(original.formData);
+
+    // 3. AI summary (non-blocking — falls back to template on failure)
+    const freshAiSummary = await generateAISummary(freshRaw);
+    const fresh: AuditResult = {
+      ...freshRaw,
+      aiSummary: freshAiSummary ?? buildFallbackSummary(freshRaw),
     };
 
-    // ── 4. Save fresh audit linked to original ─────────────────────────────
+    // 4. Snapshot current prices
     const pricingSnapshot = getCurrentSnapshot();
-    const saved = await saveAuditToDb(fullFresh, {
-      userEmail: (original as any).userEmail,
-      pricingSnapshot,
-      parentAuditId: originalId,
-    });
-    if (!saved) {
-      saveAudit(fullFresh);
-    }
 
-    // ── 5. Compute diff ────────────────────────────────────────────────────
-    const toolDiffs: ToolDiff[] = [];
+    // 5. Save re-audit linked to original, carrying user_email forward
+    await saveReauditToDb(fresh, id, userEmail, pricingSnapshot);
 
-    for (const freshTool of fullFresh.toolResults) {
-      const origTool = original.toolResults.find(
-        (r) => r.toolEntry.toolId === freshTool.toolEntry.toolId
-      );
-      if (!origTool) continue;
-
-      const recChanged =
-        origTool.recommendationType !== freshTool.recommendationType;
-      const savingsChanged =
-        Math.abs(origTool.monthlySavings - freshTool.monthlySavings) >= 1;
-
-      if (recChanged || savingsChanged) {
-        toolDiffs.push({
-          toolId: freshTool.toolEntry.toolId,
-          toolName: freshTool.toolName,
-          oldRecommendation: origTool.recommendationType,
-          newRecommendation: freshTool.recommendationType,
-          oldMonthlySavings: origTool.monthlySavings,
-          newMonthlySavings: freshTool.monthlySavings,
-          oldReasoning: origTool.reasoning,
-          newReasoning: freshTool.reasoning,
-        });
-      }
-    }
-
-    const savingsDelta =
-      fullFresh.totalMonthlySavings - original.totalMonthlySavings;
-
-    const diff: ReauditDiff = {
-      changedTools: toolDiffs.map((d) => d.toolId),
-      savingsDelta,
-      toolDiffs,
-      crossToolDiffs: [],
-    };
+    // 6. Compute diff
+    const diff = computeReauditDiff(original, fresh);
 
     const response: ReauditResponse = {
-      newAuditId: fullFresh.id,
+      newAuditId: fresh.id,
       original,
-      fresh: fullFresh,
+      fresh,
       diff,
     };
 
