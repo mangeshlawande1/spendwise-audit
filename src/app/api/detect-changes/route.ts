@@ -6,58 +6,39 @@ import {
 } from "@/lib/supabase";
 import {
   getCurrentSnapshot,
-  diffSnapshots,
   findAffectedAudits,
 } from "@/lib/pricing-diff";
 import { sendPricingChangeEmail } from "@/lib/email";
-import { TOOL_MAP } from "@/lib/pricing-data";
-import type { ApiResponse, ToolId } from "@/types";
-
-interface DetectChangesResult {
-  hasChanges: boolean;
-  changedTools: string[];
-  affectedAudits: number;
-  emailsSent: number;
-  eventId?: string;
-  skipped?: boolean;
-  skipReason?: string;
-}
+import type {
+  ApiResponse,
+  DetectChangesResponse,
+  PlanChange,
+  PricingSnapshot,
+} from "@/types";
 
 export async function POST(req: NextRequest) {
-  // ── Auth: require x-cron-secret header ────────────────────────────────────
-  const secret = req.headers.get("x-cron-secret");
-  const expected = process.env.CRON_SECRET;
-
-  if (expected && secret !== expected) {
-    return NextResponse.json<ApiResponse<never>>(
-      { error: "Unauthorized" },
-      { status: 401 }
-    );
-  }
-
   try {
-    // ── Optional: simulate a price change for demo purposes ────────────────
-    // GET /api/detect-changes?simulate=cursor bumps cursor_business by $5 in memory.
-    // REMOVE before production.
-    const url = new URL(req.url);
-    const simulateToolId = url.searchParams.get("simulate");
-
-    const currentSnapshot = getCurrentSnapshot();
-
-    if (simulateToolId) {
-      const tool = currentSnapshot.tools.find((t) => t.id === simulateToolId);
-      if (tool && tool.plans.length > 0) {
-        // Bump first non-zero plan by $5 for simulation
-        const plan = tool.plans.find((p) => p.pricePerSeat > 0);
-        if (plan) plan.pricePerSeat += 5;
-      }
+    // ── Auth ───────────────────────────────────────────────────────────────────
+    const secret = req.headers.get("x-cron-secret");
+    const expected = process.env.CRON_SECRET;
+    if (expected && secret !== expected) {
+      return NextResponse.json<ApiResponse<never>>(
+        { error: "Unauthorized" },
+        { status: 401 }
+      );
     }
 
-    // ── 1. Load all audits with a stored email ────────────────────────────
-    const audits = await getAuditsWithEmail();
+    const url = new URL(req.url);
+    const simulateTool = url.searchParams.get("simulate");
+
+    // ── Current snapshot (real pricing) ───────────────────────────────────────
+    const currentSnapshot = getCurrentSnapshot();
+
+    // ── Load audits with email + snapshot from DB ──────────────────────────────
+    let audits = await getAuditsWithEmail();
 
     if (audits.length === 0) {
-      return NextResponse.json<ApiResponse<DetectChangesResult>>({
+      return NextResponse.json<ApiResponse<DetectChangesResponse>>({
         data: {
           hasChanges: false,
           changedTools: [],
@@ -68,130 +49,140 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // ── 2. Diff each audit's stored snapshot against current pricing ──────
-    // Collect global changed tool IDs (union across all audits)
-    const globalChangedToolIds = new Set<string>();
-    const auditDiffs = new Map<
-      string,
-      { changedToolIds: string[]; auditCreatedAt: string }
-    >();
+    // ── SIMULATE MODE ──────────────────────────────────────────────────────────
+    // When ?simulate=<toolId> is passed, we patch the stored snapshots of all
+    // matching audits to look like they were created at old (higher) prices.
+    // This makes diffSnapshots() detect a real delta vs current pricing.
+    // Safe: only modifies the in-memory audit objects for this request.
+    if (simulateTool) {
+      audits = audits.map((audit) => {
+        if (!audit.pricing_snapshot) return audit;
+        // Check if this audit uses the tool we're simulating
+        const usesTool = audit.form_data.tools.some(
+          (t) => t.toolId === simulateTool
+        );
+        if (!usesTool) return audit;
 
-    for (const audit of audits) {
-      if (!audit.pricing_snapshot) continue;
-      const diff = diffSnapshots(audit.pricing_snapshot, currentSnapshot);
-      if (diff.hasChanges) {
-        diff.changedToolIds.forEach((id) => globalChangedToolIds.add(id));
-        auditDiffs.set(audit.id, {
-          changedToolIds: diff.changedToolIds,
-          auditCreatedAt: audit.created_at,
-        });
-      }
+        // Patch the stored snapshot to show the price was $5 higher in the past
+        const patchedSnapshot: PricingSnapshot = {
+          ...audit.pricing_snapshot,
+          tools: audit.pricing_snapshot.tools.map((t) => {
+            if (t.id !== simulateTool) return t;
+            return {
+              ...t,
+              plans: t.plans.map((p, idx) => {
+                if (idx !== 0) return p; // only patch the first plan
+                return { ...p, pricePerSeat: p.pricePerSeat + 5 };
+              }),
+            };
+          }),
+        };
+
+        console.log(
+          `[detect-changes] SIMULATE: audit ${audit.id} — patched stored ` +
+          `${simulateTool} plan[0] +$5 to fake an old snapshot`
+        );
+
+        return { ...audit, pricing_snapshot: patchedSnapshot };
+      });
     }
 
-    const changedToolIds = [...globalChangedToolIds];
+    // ── Detect which audits are affected ───────────────────────────────────────
+    const affected = findAffectedAudits(audits, currentSnapshot);
 
-    if (changedToolIds.length === 0) {
-      return NextResponse.json<ApiResponse<DetectChangesResult>>({
+    if (affected.length === 0) {
+      return NextResponse.json<ApiResponse<DetectChangesResponse>>({
         data: {
           hasChanges: false,
-          changedTools: changedToolIds,
+          changedTools: [],
           affectedAudits: 0,
           emailsSent: 0,
+          skipReason: simulateTool
+            ? `No audits in DB use the tool "${simulateTool}" — submit an audit with that tool first`
+            : "No pricing changes detected",
         },
       });
     }
 
-    // ── 3. Deduplication: skip if already notified in last 24h ────────────
-    const alreadyNotified = await getRecentPricingEvent(changedToolIds);
-    if (alreadyNotified) {
-      return NextResponse.json<ApiResponse<DetectChangesResult>>({
-        data: {
-          hasChanges: true,
-          changedTools: changedToolIds,
-          affectedAudits: 0,
-          emailsSent: 0,
-          skipped: true,
-          skipReason: "already_notified_in_last_24h",
-        },
-      });
-    }
-
-    // ── 4. Find affected audits and group by email ─────────────────────────
-    const affectedAudits = findAffectedAudits(
-      audits.map((a) => ({
-        id: a.id,
-        user_email: a.user_email,
-        form_data: a.form_data,
-        pricing_snapshot: a.pricing_snapshot,
-      })),
-      changedToolIds
+    // ── Collect changed tool IDs ───────────────────────────────────────────────
+    const allChangedToolIds = Array.from(
+      new Set<string>(affected.flatMap((a) => a.changes.map((c) => c.toolId)))
     );
 
-    // Group by email — one email per user (use their most recent affected audit)
-    const emailToAudit = new Map<
+    // ── Deduplication (skip in simulate mode) ─────────────────────────────────
+    if (!simulateTool) {
+      const alreadySent = await getRecentPricingEvent(allChangedToolIds);
+      if (alreadySent) {
+        return NextResponse.json<ApiResponse<DetectChangesResponse>>({
+          data: {
+            hasChanges: true,
+            changedTools: allChangedToolIds,
+            affectedAudits: affected.length,
+            emailsSent: 0,
+            skipped: true,
+            skipReason: "Already notified in last 24h",
+          },
+        });
+      }
+    }
+
+    // ── Group by email — one email per user ────────────────────────────────────
+    const byEmail = new Map<
       string,
-      { auditId: string; auditCreatedAt: string }
+      { auditId: string; toolNames: string[]; changes: PlanChange[] }
     >();
-    for (const affected of affectedAudits) {
-      if (!emailToAudit.has(affected.email)) {
-        const auditDiff = auditDiffs.get(affected.id);
-        emailToAudit.set(affected.email, {
-          auditId: affected.id,
-          auditCreatedAt: auditDiff?.auditCreatedAt ?? new Date().toISOString(),
-        });
+
+    for (const a of affected) {
+      const existing = byEmail.get(a.email);
+      const toolNames = Array.from(new Set<string>(a.changes.map((c) => c.toolName)));
+
+      if (!existing) {
+        byEmail.set(a.email, { auditId: a.id, toolNames, changes: a.changes });
+      } else {
+        existing.toolNames = Array.from(
+          new Set<string>([...existing.toolNames, ...toolNames])
+        );
+        existing.changes = [...existing.changes, ...a.changes];
       }
     }
 
-    const affectedEmails = [...emailToAudit.keys()];
-
-    // ── 5. Build the global changes list for the email ─────────────────────
-    // Use a representative snapshot — take first audit with a snapshot
-    const representativeAudit = audits.find((a) => a.pricing_snapshot);
-    const globalDiff = representativeAudit?.pricing_snapshot
-      ? diffSnapshots(representativeAudit.pricing_snapshot, currentSnapshot)
-      : null;
-
-    const changes = globalDiff?.changes ?? [];
-
-    // ── 6. Send one email per unique user email ────────────────────────────
+    // ── Send emails ────────────────────────────────────────────────────────────
     let emailsSent = 0;
-    for (const [email, { auditId, auditCreatedAt }] of emailToAudit) {
-      const auditRecord = audits.find((a) => a.id === auditId);
-      const toolIdsInAudit = auditRecord?.form_data.tools.map((t) => t.toolId) ?? [];
-      const affectedToolNames = changedToolIds
-        .filter((id) => toolIdsInAudit.includes(id as ToolId))
-        .map((id) => TOOL_MAP.get(id as ToolId)?.name ?? id);
+    const notifiedEmails: string[] = [];
 
-      try {
-        const sent = await sendPricingChangeEmail({
-          email,
-          auditId,
-          auditCreatedAt,
-          changes,
-          affectedToolNames,
-        });
-        if (sent) emailsSent++;
-      } catch (err) {
-        console.error(`[detect-changes] Failed to send email to ${email}:`, err);
-        // Continue — one failure should not stop the rest
+    for (const [email, payload] of Array.from(byEmail.entries())) {
+      const sent = await sendPricingChangeEmail(
+        email,
+        payload.auditId,
+        payload.toolNames,
+        payload.changes
+      );
+      if (sent) {
+        emailsSent++;
+        notifiedEmails.push(email);
       }
     }
 
-    // ── 7. Log the event for deduplication ────────────────────────────────
-    const oldSnapshot = audits.find((a) => a.pricing_snapshot)?.pricing_snapshot!;
+    // ── Log pricing event (dedup guard for future calls) ─────────────────────
+    const beforeSnapshot: PricingSnapshot =
+      audits[0].pricing_snapshot ?? {
+        capturedAt: new Date(Date.now() - 86400000).toISOString(),
+        tools: [],
+      };
+
     const eventId = await savePricingEvent({
-      snapshotBefore: oldSnapshot,
+      snapshotBefore: beforeSnapshot,
       snapshotAfter: currentSnapshot,
-      changedTools: changedToolIds,
-      affectedEmails,
+      changedTools: allChangedToolIds,
+      affectedEmails: notifiedEmails,
       emailsSent,
     });
 
-    return NextResponse.json<ApiResponse<DetectChangesResult>>({
+    return NextResponse.json<ApiResponse<DetectChangesResponse>>({
       data: {
         hasChanges: true,
-        changedTools: changedToolIds,
-        affectedAudits: affectedAudits.length,
+        changedTools: allChangedToolIds,
+        affectedAudits: affected.length,
         emailsSent,
         eventId: eventId ?? undefined,
       },
@@ -203,4 +194,33 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+// ─── GET handler: browser-friendly test trigger ───────────────────────────────
+// Visit http://localhost:3000/api/detect-changes?simulate=cursor&secret=test123
+// This lets you test without curl.
+export async function GET(req: NextRequest) {
+  const url = new URL(req.url);
+  const secret = url.searchParams.get("secret");
+  const expected = process.env.CRON_SECRET;
+
+  if (expected && secret !== expected) {
+    return NextResponse.json<ApiResponse<never>>(
+      { error: "Unauthorized — add ?secret=YOUR_CRON_SECRET to the URL" },
+      { status: 401 }
+    );
+  }
+
+  // Reuse POST logic by forwarding to POST handler with same URL
+  // but inject x-cron-secret header from query param
+  const headers = new Headers(req.headers);
+  if (secret) headers.set("x-cron-secret", secret);
+
+  const syntheticReq = new NextRequest(req.url, {
+    method: "POST",
+    headers,
+  });
+
+  // Re-invoke the POST handler
+  return POST(syntheticReq);
 }
