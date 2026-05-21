@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
     // 1. Run deterministic audit (no AI, fast)
     const auditResult = runAudit(body);
 
-    // 2. Generate AI summary — returns null on any failure, we fall back to template
+    // 2. Generate AI summary — returns null on any failure, fall back to template
     const aiSummary = await generateAISummary(auditResult);
 
     const fullResult: AuditResult = {
@@ -36,13 +36,17 @@ export async function POST(req: NextRequest) {
       aiSummary: aiSummary ?? buildFallbackSummary(auditResult),
     };
 
-    // 3. Capture pricing snapshot at the time of this audit (Round 2)
+    // 3. Capture pricing snapshot at audit creation time (Round 2).
+    // This snapshot is stored in Supabase and later compared against current
+    // pricing by detect-changes to identify affected audits.
     const pricingSnapshot = getCurrentSnapshot();
 
-    // 4. Persist to Supabase (primary) with in-memory fallback
+    // 4. Persist to Supabase (primary) with in-memory fallback.
+    // user_email is undefined here — it is backfilled by saveLeadToDb()
+    // when the user submits the lead capture form on the results page.
     const saved = await saveAuditToDb(fullResult, undefined, pricingSnapshot);
     if (!saved) {
-      // Supabase failed — fall back to in-memory so the user still gets results
+      // Supabase unavailable — fall back to in-memory so user still gets results
       saveAudit(fullResult);
     }
 
