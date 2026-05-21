@@ -45,6 +45,7 @@ export function diffSnapshots(
   const changes: PlanChange[] = [];
 
   for (const currentTool of current.tools) {
+
     const oldTool = old.tools.find((t) => t.id === currentTool.id);
     const toolDef = TOOL_MAP.get(currentTool.id as ToolId);
     const toolName = toolDef?.name ?? currentTool.id;
@@ -100,6 +101,7 @@ export function diffSnapshots(
         });
       }
     }
+    
   }
 
   const changedToolIds = Array.from(new Set(changes.map((c) => c.toolId)));

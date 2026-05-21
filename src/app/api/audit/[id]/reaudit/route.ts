@@ -42,7 +42,10 @@ export async function POST(
     const pricingSnapshot = getCurrentSnapshot();
 
     // 5. Save re-audit linked to original, carrying user_email forward
-    await saveReauditToDb(fresh, id, userEmail, pricingSnapshot);
+    const saved = await saveReauditToDb(fresh, id, userEmail, pricingSnapshot);
+    if (!saved) {
+      console.warn(`[/api/audit/${id}/reaudit] Failed to persist re-audit ${fresh.id}`);
+    }
 
     // 6. Compute diff
     const diff = computeReauditDiff(original, fresh);

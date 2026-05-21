@@ -38,7 +38,7 @@ export function DiffView({ original, fresh, diff }: DiffViewProps) {
       {diff.savingsDelta !== 0 && (
         <div className="text-center">
           <p className="text-slate-500 text-xs">
-            That's{" "}
+            That&apos;s{" "}
             <span
               className={
                 diff.savingsDelta > 0 ? "text-brand-400 font-medium" : "text-red-400 font-medium"

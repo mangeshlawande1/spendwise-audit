@@ -176,20 +176,27 @@ export async function getAuditsWithEmail(): Promise<
 }
 
 export async function getRecentPricingEvent(
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  _changedToolIds: string[]
+  changedToolIds: string[]
 ): Promise<boolean> {
   const client = getServiceClient();
   if (!client) return false;
   try {
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const sorted = [...changedToolIds].sort();
     const { data, error } = await client
       .from("pricing_events")
-      .select("id")
+      .select("changed_tools")
       .gte("detected_at", oneDayAgo)
-      .limit(1);
+      .limit(100);
     if (error) return false;
-    return (data ?? []).length > 0;
+    // Check if any event has the exact same set of changed tools
+    return (data ?? []).some((row) => {
+      const existing = [...(row.changed_tools as string[])].sort();
+      return (
+        existing.length === sorted.length &&
+        existing.every((v, i) => v === sorted[i])
+      );
+    });
   } catch {
     return false;
   }

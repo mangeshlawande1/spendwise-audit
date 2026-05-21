@@ -40,7 +40,7 @@ npm run dev
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | ✅ | Supabase anon key (client-side reads) |
 | `SUPABASE_SERVICE_ROLE_KEY` | ✅ | Supabase service role (server writes) |
 | `RESEND_API_KEY` | ✅ | Resend API key — for all transactional emails |
-| `ANTHROPIC_API_KEY` | ✅ | Claude API — for AI audit summaries |
+| `GEMINI_API_KEY` | ✅ | Gemini API — for AI audit summaries |
 | `CRON_SECRET` | ✅ | Secret that protects `/api/detect-changes` |
 | `NEXT_PUBLIC_BASE_URL` | ✅ | **Your production URL** e.g. `https://your-app.vercel.app` — without this, email links point to localhost |
 
