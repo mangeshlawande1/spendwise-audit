@@ -20,7 +20,7 @@ export type UseCase =
 export interface PlanDefinition {
   id: string;
   name: string;
-  pricePerSeat: number; // USD/month
+  pricePerSeat: number;
   minSeats?: number;
   maxSeats?: number;
   features: string[];
@@ -41,8 +41,6 @@ export interface ToolEntry {
   toolId: ToolId;
   planId: string;
   seats: number;
-
-  // what they ACTUALLY pay (may differ from catalog due to discounts)
   monthlySpend: number;
 }
 
@@ -65,23 +63,15 @@ export type RecommendationType =
 
 export interface ToolAuditResult {
   toolEntry: ToolEntry;
-
   toolName: string;
   planName: string;
-
   currentMonthlyCost: number;
-
   recommendationType: RecommendationType;
-
   recommendedPlanId?: string;
   recommendedToolId?: ToolId;
-
   recommendedMonthlyCost: number;
-
   monthlySavings: number;
   annualSavings: number;
-
-  // finance-grade reasoning
   reasoning: string;
 }
 
@@ -101,25 +91,14 @@ export type CrossToolSeverity =
 
 export interface CrossToolFinding {
   type: CrossToolFindingType;
-
   severity: CrossToolSeverity;
-
-  // tools involved
   toolNames: string[];
-
-  // UI content
   title: string;
   description: string;
   action: string;
-
-  // savings
   monthlySavings: number;
   annualSavings: number;
-
-  // confidence score (0-100)
   confidence: number;
-
-  // optional flags
   isCredex?: boolean;
 }
 
@@ -127,27 +106,14 @@ export interface CrossToolFinding {
 
 export interface AuditResult {
   id: string;
-
   createdAt: string;
-
-  // stored without PII for shareable reports
   formData: AuditFormData;
-
-  // per-tool recommendations
   toolResults: ToolAuditResult[];
-
-  // stack-level findings
   crossToolFindings: CrossToolFinding[];
-
   totalMonthlySavings: number;
   totalAnnualSavings: number;
-
-  // nullable if AI generation fails
   aiSummary: string | null;
-
   savingsTier: "high" | "medium" | "low" | "optimal";
-
-  // 0-100 efficiency score
   efficiencyScore: number;
 }
 
@@ -166,4 +132,73 @@ export interface LeadData {
 export interface ApiResponse<T> {
   data?: T;
   error?: string;
+}
+
+// ─── Round 2: Pricing Change Detection ───────────────────────────────────────
+
+export interface PricingSnapshot {
+  capturedAt: string;
+  tools: Array<{
+    id: string;
+    plans: Array<{
+      id: string;
+      name: string;
+      pricePerSeat: number;
+    }>;
+  }>;
+}
+
+export interface PlanChange {
+  toolId: string;
+  toolName: string;
+  planId: string;
+  planName: string;
+  oldPrice: number;
+  newPrice: number;
+  delta: number;
+  changeType: "price_change" | "plan_added" | "plan_removed";
+}
+
+export interface SnapshotDiff {
+  hasChanges: boolean;
+  changes: PlanChange[];
+  changedToolIds: string[];
+}
+
+export interface ToolDiffEntry {
+  toolId: string;
+  toolName: string;
+  planName: string;
+  oldRecommendationType: RecommendationType;
+  newRecommendationType: RecommendationType;
+  oldMonthlySavings: number;
+  newMonthlySavings: number;
+  savingsDelta: number;
+  oldReasoning: string;
+  newReasoning: string;
+  changed: boolean;
+}
+
+export interface ReauditDiff {
+  savingsDelta: number;
+  toolDiffs: ToolDiffEntry[];
+  changedToolCount: number;
+  hasImprovements: boolean;
+}
+
+export interface ReauditResponse {
+  newAuditId: string;
+  original: AuditResult;
+  fresh: AuditResult;
+  diff: ReauditDiff;
+}
+
+export interface DetectChangesResponse {
+  hasChanges: boolean;
+  changedTools: string[];
+  affectedAudits: number;
+  emailsSent: number;
+  eventId?: string;
+  skipped?: boolean;
+  skipReason?: string;
 }

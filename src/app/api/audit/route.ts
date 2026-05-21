@@ -3,6 +3,7 @@ import { runAudit } from "@/lib/audit-engine";
 import { saveAudit } from "@/lib/audit-store";
 import { generateAISummary, buildFallbackSummary } from "@/lib/ai-summary";
 import { saveAuditToDb } from "@/lib/supabase";
+import { getCurrentSnapshot } from "@/lib/pricing-diff";
 import type { AuditFormData, ApiResponse, AuditResult } from "@/types";
 
 export async function POST(req: NextRequest) {
@@ -35,8 +36,11 @@ export async function POST(req: NextRequest) {
       aiSummary: aiSummary ?? buildFallbackSummary(auditResult),
     };
 
-    // 3. Persist to Supabase (primary) with in-memory fallback
-    const saved = await saveAuditToDb(fullResult);
+    // 3. Capture pricing snapshot at the time of this audit (Round 2)
+    const pricingSnapshot = getCurrentSnapshot();
+
+    // 4. Persist to Supabase (primary) with in-memory fallback
+    const saved = await saveAuditToDb(fullResult, undefined, pricingSnapshot);
     if (!saved) {
       // Supabase failed — fall back to in-memory so the user still gets results
       saveAudit(fullResult);

@@ -1,18 +1,25 @@
 # SpendWise — AI Spend Audit
 
-SpendWise is a free tool for startup founders and engineering managers that audits their AI tool subscriptions (Cursor, Claude, ChatGPT, Copilot, etc.) and surfaces real, defensible savings opportunities in under 30 seconds. No login required. Built as a lead-generation asset for [Credex](https://credex.rocks).
+SpendWise audits AI tool subscriptions (Cursor, Claude, ChatGPT, Copilot, etc.)
+and surfaces savings opportunities in under 30 seconds — then **alerts users
+automatically when pricing changes**, so recommendations never go stale.
 
-## Screenshots
+Free. No login required. Built for [Credex](https://credex.rocks).
 
+---
 
-| Page | Preview |
+## Pages
+
+| Route | What it does |
 |---|---|
-| Landing page | `/` — headline, CTA, social proof |
-| Audit form | `/audit` — tool selector with plan dropdowns and seat inputs |
-| Results page | `/results/[id]` — savings hero, per-tool breakdown, Credex CTA |
-| Shared audit | `/r/[id]` — public PII-stripped view with OG tags |
+| `/` | Landing page — hero, CTA, link to admin |
+| `/audit` | Audit form — tool selector, plan dropdowns, seat inputs |
+| `/results/[id]` | Results — savings hero, per-tool breakdown, lead form |
+| `/results/[id]?reaudit=1` | **Round 2** — auto-runs diff on load, shows old vs new side-by-side |
+| `/r/[id]` | Public share view — PII-stripped, OG tags |
+| `/admin` | **Round 2** — pricing change detection control panel |
 
-> Screenshots: see `/public/screenshots/` in the repo for full-resolution images.
+---
 
 ## Quick Start
 
@@ -20,49 +27,155 @@ SpendWise is a free tool for startup founders and engineering managers that audi
 git clone https://github.com/YOUR_USERNAME/spendwise
 cd spendwise
 npm install
-cp .env.example .env.local  # fill in your keys
+cp .env.example .env.local   # fill in keys (see below)
 npm run dev
 # → http://localhost:3000
 ```
 
 ### Environment Variables
 
-See `.env.example` for required variables. You need:
-- **Anthropic API key** — for the AI summary feature
-- **Supabase** project URL + anon key + service role — for lead capture and audit storage
-- **Resend API key** — for transactional confirmation emails
+| Variable | Required | What it's for |
+|---|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | ✅ | Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | ✅ | Supabase anon key (client-side reads) |
+| `SUPABASE_SERVICE_ROLE_KEY` | ✅ | Supabase service role (server writes) |
+| `RESEND_API_KEY` | ✅ | Resend API key — for all transactional emails |
+| `GEMINI_API_KEY` | ✅ | Gemini API — for AI audit summaries |
+| `CRON_SECRET` | ✅ | Secret that protects `/api/detect-changes` |
+| `NEXT_PUBLIC_BASE_URL` | ✅ | **Your production URL** e.g. `https://your-app.vercel.app` — without this, email links point to localhost |
+
+> Set `NEXT_PUBLIC_BASE_URL` in **Vercel → Settings → Environment Variables**
+> and redeploy. This is the most common setup mistake.
+
+### Database Setup (Supabase)
+
+Run this SQL in your Supabase project (**SQL Editor → New query**):
+
+```sql
+-- Audits table (Round 1 + Round 2 columns)
+create table audits (
+  id                   text primary key,
+  created_at           timestamptz default now(),
+  form_data            jsonb not null,
+  tool_results         jsonb not null,
+  cross_tool_findings  jsonb default '[]',
+  efficiency_score     int default 80,
+  total_monthly_savings numeric(10,2) default 0,
+  total_annual_savings  numeric(10,2) default 0,
+  savings_tier         text,
+  ai_summary           text,
+  user_email           text,           -- backfilled when user submits lead form
+  pricing_snapshot     jsonb,          -- Round 2: pricing at time of audit
+  parent_audit_id      text            -- Round 2: links re-audit to original
+);
+
+-- Leads table
+create table leads (
+  id           uuid primary key default gen_random_uuid(),
+  created_at   timestamptz default now(),
+  audit_id     text references audits(id),
+  email        text not null,
+  company_name text,
+  role         text,
+  team_size    int,
+  ip_hash      text
+);
+
+-- Pricing events table (Round 2: dedup guard for detect-changes)
+create table pricing_events (
+  id             uuid primary key default gen_random_uuid(),
+  detected_at    timestamptz default now(),
+  snapshot_before jsonb,
+  snapshot_after  jsonb,
+  changed_tools   text[],
+  affected_emails text[],
+  emails_sent     int default 0
+);
+```
 
 ### Deploy
-
-Optimized for **Vercel** (zero config with Next.js):
 
 ```bash
 npx vercel --prod
 ```
 
-Or any platform that supports Node.js 20+.
+Any platform supporting Node.js 20+ works. For Vercel, the `vercel.json`
+cron schedule runs pricing detection automatically at 09:00 UTC daily
+(requires Vercel Pro — use the `/admin` button on the free tier).
 
 ### Run Tests
 
 ```bash
-npm test                  # run all tests
-npm run test:watch        # watch mode
-npm run type-check        # TypeScript only
+npm test            # all tests
+npm run test:watch  # watch mode
+npm run type-check  # TypeScript only
 ```
 
 ---
 
-## Decisions
+## Architecture
 
-1. **Next.js App Router over pages/**: Server components let us keep audit logic server-side (no client bundle bloat) and use route handlers cleanly. The RSC model also makes OG metadata per-audit URL easy to implement.
+```
+User submits audit
+  POST /api/audit
+    → runAudit(formData)          deterministic rules engine
+    → generateAISummary()         Claude API (non-blocking, falls back to template)
+    → getCurrentSnapshot()        freeze prices at audit time
+    → saveAuditToDb()             Supabase: audits table
 
-2. **Zustand with `persist` for form state**: The spec requires form state to survive page reloads. Zustand's `persist` middleware uses localStorage under the hood with zero config. Redux would be overkill; React context doesn't persist.
+User enters email on results page
+  POST /api/leads
+    → saveLeadToDb()              Supabase: leads table
+    → UPDATE audits SET user_email = ?
+    → sendAuditConfirmation()     Resend: HTML email with audit summary
 
-3. **Deterministic rules for audit engine, not AI**: The spec explicitly tests "knowing when not to use AI." Hardcoded rules are auditable, deterministic, and explainable to a finance person. AI is used only for the summary paragraph.
+Pricing change detected  (admin button or daily cron)
+  GET /api/detect-changes?simulate=cursor&secret=…
+    → getAuditsWithEmail()        only original audits, never re-audits
+    → diffSnapshots()             old stored snapshot vs current pricing
+    → findAffectedAudits()        filter to audits that use changed tools
+    → group by email              one email per user, never per audit
+    → sendPricingChangeEmail()    Resend: HTML email with diff link
+    → savePricingEvent()          dedup guard: skip if notified in last 24h
 
-4. **Supabase over a custom Postgres**: Supabase gives a free-tier Postgres, a REST API, and row-level security in under 10 minutes. For a 7-day build, the alternative (Render Postgres + Drizzle ORM) adds 2+ hours of setup with no user-facing benefit.
+User clicks email link  →  /results/[id]?reaudit=1
+  useEffect detects ?reaudit=1
+    → POST /api/audit/[id]/reaudit   auto-triggered, no button needed
+        → runAudit(original.formData) with current prices
+        → computeReauditDiff()
+        → saveReauditToDb()
+    → <DiffView> renders side-by-side, savings delta headline
+```
 
-5. **Resend over SES for transactional email**: SES requires domain verification and production approval (hours to days). Resend's free tier works immediately with a dev API key and has a React Email integration that matches our stack.
+---
+
+## Round 2 Feature: Re-audit on Pricing Change
+
+See [`ROUND2_PR.md`](./ROUND2_PR.md) for the full PR description.
+See [`ROUND2_SETUP.md`](./ROUND2_SETUP.md) for step-by-step verification.
+See [`ROUND2_DEVLOG.md`](./ROUND2_DEVLOG.md) for the 36-hour build log.
+See [`ROUND2_REFLECTION.md`](./ROUND2_REFLECTION.md) for post-build reflection.
+
+---
+
+## Key Engineering Decisions
+
+**Deterministic audit engine, not AI** — Rules are auditable and explainable
+to a finance person. AI is used only for the summary paragraph.
+
+**Supabase over custom Postgres** — Free-tier Postgres + REST API + row-level
+security in under 10 minutes. The right tradeoff for a time-constrained build.
+
+**Resend over SES** — SES requires domain verification and production approval.
+Resend's free tier works immediately with a dev key.
+
+**In-memory fallback for Supabase** — If Supabase is down or misconfigured,
+audits fall back to an in-memory store so users always get results. Detection
+and emails won't work, but the core audit flow does.
+
+**Simulate mode in detect-changes** — `?simulate=cursor` patches stored
+snapshots in-memory (+$5/seat) to trigger the email flow without editing any
+pricing files. Safe: the DB is never mutated.
 
 ---
 
